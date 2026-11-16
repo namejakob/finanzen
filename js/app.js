@@ -3,7 +3,7 @@ import * as L from './logic.js';
 import * as S from './store.js';
 import * as Y from './sync.js';
 
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 const SYNC_HOST = 'finanzen.jakobg.de';
 // Abgleich nur unter der eigenen Adresse (dort läuft der Server) und lokal zum Testen
 const SYNC_AVAILABLE = [SYNC_HOST, 'localhost', '127.0.0.1'].includes(location.hostname);
@@ -36,6 +36,16 @@ const money = (c, o) => esc(L.formatMoney(c, o));
 const nB = (n) => `${n} ${n === 1 ? 'Buchung' : 'Buchungen'}`;
 const cat = (id) => state.categories.find((c) => c.id === id);
 const catOrFallback = (id, type) => cat(id) || cat(L.FALLBACK_CATEGORY[type]) || { id, name: 'Unbekannt', emoji: '❔', type };
+const POT_EMOJI = '🫙';
+const contractEmoji = (c) => (L.isPot(c) ? POT_EMOJI : catOrFallback(c.categoryId, c.type).emoji);
+const usesCat = (id) => (x) => x.categoryId === id || (x.split || x.parts || []).some((p) => p.categoryId === id);
+const recat = (from, to) => (x) => {
+  const fix = (o) => (o.categoryId === from ? { ...o, categoryId: to } : o);
+  const y = fix(x);
+  if (y.split) return { ...y, split: y.split.map(fix) };
+  if (y.parts) return { ...y, parts: y.parts.map(fix) };
+  return y;
+};
 
 const ICON = {
   left: '<svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>',
@@ -437,27 +447,43 @@ function renderYearChart() {
 
 function upcomingRow(u, t) {
   const c = u.contract;
-  const k = catOrFallback(c.categoryId, c.type);
   const days = L.daysBetween(t, u.date);
   const when = days === 1 ? 'morgen' : `in ${days} Tagen`;
   return `<button class="row" data-action="edit-contract" data-id="${esc(c.id)}">
-    <span class="emo">${esc(k.emoji)}</span>
+    <span class="emo">${esc(contractEmoji(c))}</span>
     <span class="main"><span class="title">${esc(c.name)}</span><span class="sub">${esc(L.formatDate(u.date))} · ${when}</span></span>
     <span class="right"><span class="amount num ${c.type === 'einnahme' ? 'pos' : ''}">${c.type === 'einnahme' ? money(c.amount, { sign: true }) : money(c.amount)}</span><span class="amount-sub">${esc(L.INTERVALS[c.interval].label)}</span></span>
   </button>`;
 }
 
-function entryRow(e, showDate = false) {
+/** Betrag einer Buchung, beim Kategorie-Filter nur der Teil dieser Kategorie (Topf-Buchungen). */
+function amountIn(e, catId) {
+  if (!catId) return e.amount;
+  return L.entryPieces(e).reduce((a, p) => a + (p.categoryId === catId ? p.amount : 0), 0);
+}
+
+function entryRow(e, showDate = false, focusCat = null) {
   const k = catOrFallback(e.categoryId, e.type);
-  const title = e.note || k.name;
+  const isSplit = !!(e.split && e.split.length);
+  let title = e.note || k.name;
+  let emoji = k.emoji;
+  const amount = amountIn(e, focusCat);
   const subParts = [];
   if (showDate) subParts.push(L.formatDayLabel(e.date, today()));
-  if (e.note) subParts.push(k.name);
+  if (isSplit && focusCat) {
+    // Gefiltert nach Kategorie: nur die passenden Posten des Topfs zeigen
+    emoji = catOrFallback(focusCat, e.type).emoji;
+    title = e.split.filter((p) => p.categoryId === focusCat).map((p) => p.name).join(', ');
+    subParts.push(`aus ${e.note || 'Topf'}`);
+  } else if (isSplit) {
+    emoji = POT_EMOJI;
+    subParts.push(e.split.map((p) => p.name).join(', '));
+  } else if (e.note) subParts.push(k.name);
   const isIncome = e.type === 'einnahme';
   return `<button class="row" data-action="edit-entry" data-id="${esc(e.id)}">
-    <span class="emo">${esc(k.emoji)}</span>
+    <span class="emo">${esc(emoji)}</span>
     <span class="main"><span class="title">${esc(title)}${e.contractId ? '<span class="auto-mark" title="Automatisch gebuchte Fixkosten">↻ fix</span>' : ''}</span>${subParts.length ? `<span class="sub">${esc(subParts.join(' · '))}</span>` : ''}</span>
-    <span class="right"><span class="amount num ${isIncome ? 'pos' : ''}">${isIncome ? money(e.amount, { sign: true }) : money(-e.amount)}</span></span>
+    <span class="right"><span class="amount num ${isIncome ? 'pos' : ''}">${isIncome ? money(amount, { sign: true }) : money(-amount)}</span></span>
   </button>`;
 }
 
@@ -497,8 +523,8 @@ function renderEntryResults() {
   }
   if (!searching) html += periodSwitcher();
 
-  const out = list.filter((e) => e.type === 'ausgabe').reduce((a, e) => a + e.amount, 0);
-  const inc = list.filter((e) => e.type === 'einnahme').reduce((a, e) => a + e.amount, 0);
+  const out = list.filter((e) => e.type === 'ausgabe').reduce((a, e) => a + amountIn(e, ui.catFilter), 0);
+  const inc = list.filter((e) => e.type === 'einnahme').reduce((a, e) => a + amountIn(e, ui.catFilter), 0);
   if (list.length) {
     html += `<div class="summary-line"><span>${list.length} ${list.length === 1 ? 'Buchung' : 'Buchungen'}</span><span class="num">${inc ? `<span class="pos">${money(inc, { sign: true })}</span> · ` : ''}${money(-out)}</span></div>`;
   }
@@ -521,8 +547,8 @@ function renderEntryResults() {
         dayHtml = '';
         daySum = 0;
       }
-      dayHtml += entryRow(e);
-      if (e.type === 'ausgabe') daySum += e.amount;
+      dayHtml += entryRow(e, false, ui.catFilter);
+      if (e.type === 'ausgabe') daySum += amountIn(e, ui.catFilter);
     }
     flush();
     if (list.length > LIMIT) html += `<p class="hint">Die ersten ${LIMIT} von ${list.length} Treffern. Grenz die Suche weiter ein.</p>`;
@@ -555,6 +581,14 @@ function renderContracts() {
     </div>
   </section>`;
 
+  const pots = L.runningPots(state, t);
+  if (pots.length) {
+    const potSum = pots.reduce((a, c) => a + L.contractPerMonth(c), 0);
+    html += `<section class="card span2"><h2 class="card-title"><span>${POT_EMOJI} Töpfe</span><small class="num">${money(potSum)}/Monat · ${money(potSum * 12, { round: true })}/Jahr</small></h2><div class="list">`;
+    for (const c of pots) html += contractRow(c, t) + potPartsHtml(c);
+    html += '</div></section>';
+  }
+
   const groups = L.contractGroups(state, t, 'ausgabe');
   for (const g of groups) {
     html += `<section class="card"><h2 class="card-title"><span>${esc(g.category?.emoji || '')} ${esc(g.category?.name || 'Ohne Kategorie')}</span><small class="num">${money(g.perMonth)}/Monat · ${money(g.perYear, { round: true })}/Jahr</small></h2><div class="list">`;
@@ -576,18 +610,32 @@ function renderContracts() {
   return html + '</div>';
 }
 
+/** Posten eines Topfs als kleine Liste unter der Topf-Zeile. */
+function potPartsHtml(c) {
+  const perLabel = c.interval === 'monatlich' ? '' : ' je Zahlung';
+  const rows = [...c.parts]
+    .sort((a, b) => L.partShare(b, c.interval) - L.partShare(a, c.interval))
+    .map((p) => {
+      const k = catOrFallback(p.categoryId, c.type);
+      return `<div class="pot-part"><span><span aria-hidden="true">${esc(k.emoji)}</span> ${esc(p.name)}</span><span class="num">${p.per === 'jahr' ? `${money(p.amount)}/Jahr` : `${money(p.amount)}${perLabel}`}</span></div>`;
+    })
+    .join('');
+  const total = Math.round(L.partsTotal(c.parts, c.interval));
+  const diff = total !== c.amount ? `<div class="pot-part pot-note"><span>Posten ergeben ${money(total)}, überwiesen werden ${money(c.amount)}. Verteilt wird anteilig.</span></div>` : '';
+  return `<div class="pot-parts">${rows}${diff}</div>`;
+}
+
 function contractRow(c, t, dim = false) {
-  const k = catOrFallback(c.categoryId, c.type);
   const next = L.nextOccurrence(c, t);
   const iv = L.INTERVALS[c.interval];
-  let sub = `${L.formatMoney(c.amount)} ${iv.label}`;
+  let sub = `${L.formatMoney(c.amount)} ${iv.label}${L.isPot(c) ? ` · Topf mit ${c.parts.length} Posten` : ''}`;
   let sub2 = '';
   if (dim) sub = !c.active ? `pausiert · ${sub}` : `beendet ${L.formatDate(c.end)}`;
   else if (next) sub2 = `nächste ${L.formatDate(next)}${c.end ? ` · endet ${L.formatDate(c.end)}` : ''}`;
   else if (c.end) sub2 = `endet ${L.formatDate(c.end)}`;
   const perMonth = L.contractPerMonth(c);
   return `<button class="row ${dim ? 'dim' : ''}" data-action="edit-contract" data-id="${esc(c.id)}">
-    <span class="emo">${esc(k.emoji)}</span>
+    <span class="emo">${esc(contractEmoji(c))}</span>
     <span class="main"><span class="title">${esc(c.name)}</span><span class="sub">${esc(sub)}</span>${sub2 ? `<span class="sub">${esc(sub2)}</span>` : ''}</span>
     <span class="right"><span class="amount num ${c.type === 'einnahme' ? 'pos' : ''}">${money(perMonth)}</span><span class="amount-sub">pro Monat</span></span>
   </button>`;
@@ -785,8 +833,8 @@ async function syncCopy() {
 }
 
 function usageText(id) {
-  const n = state.entries.filter((e) => e.categoryId === id).length;
-  const c = state.contracts.filter((x) => x.categoryId === id).length;
+  const n = state.entries.filter(usesCat(id)).length;
+  const c = state.contracts.filter(usesCat(id)).length;
   const parts = [];
   if (n) parts.push(`${n} ${n === 1 ? 'Buchung' : 'Buchungen'}`);
   if (c) parts.push(`${c} Fixkosten`);
@@ -800,23 +848,25 @@ let draft = null;
 function openEntrySheet(entry = null, preset = {}) {
   const t = today();
   draft = entry
-    ? { kind: 'entry', id: entry.id, type: entry.type, amountText: L.centsToInput(entry.amount), categoryId: entry.categoryId, note: entry.note || '', date: entry.date, categoryTouched: true, contractId: entry.contractId || null }
-    : { kind: 'entry', id: null, type: preset.type || 'ausgabe', amountText: '', categoryId: null, note: '', date: t, categoryTouched: false, contractId: null };
+    ? { kind: 'entry', id: entry.id, type: entry.type, amountText: L.centsToInput(entry.amount), categoryId: entry.categoryId, note: entry.note || '', date: entry.date, categoryTouched: true, contractId: entry.contractId || null, split: entry.split || null }
+    : { kind: 'entry', id: null, type: preset.type || 'ausgabe', amountText: '', categoryId: null, note: '', date: t, categoryTouched: false, contractId: null, split: null };
 
   const contract = draft.contractId ? state.contracts.find((c) => c.id === draft.contractId) : null;
   sheet.innerHTML = `
     <div class="sheet-head"><h2 id="sheet-title">${entry ? 'Buchung bearbeiten' : 'Neu eintragen'}</h2><button class="icon-btn flat" data-action="close-sheet" aria-label="Schließen">${ICON.close}</button></div>
     <form class="sheet-body" id="entry-form" novalidate>
-      <div class="field"><div class="seg wide" role="group" aria-label="Art">
+      ${draft.split ? '' : `<div class="field"><div class="seg wide" role="group" aria-label="Art">
         <button type="button" data-action="entry-type" data-type="ausgabe" aria-pressed="${draft.type === 'ausgabe'}">Ausgabe</button>
         <button type="button" data-action="entry-type" data-type="einnahme" aria-pressed="${draft.type === 'einnahme'}">Einnahme</button>
-      </div></div>
-      <div class="field"><label for="amount">Betrag</label>
+      </div></div>`}
+      <div class="field"><label for="amount">${draft.split ? 'Überweisung in den Topf' : 'Betrag'}</label>
         <div class="amount-wrap"><input id="amount" class="input amount-input" inputmode="decimal" autocomplete="off" enterkeyhint="done" placeholder="0,00" value="${esc(draft.amountText)}"><span class="cur">€</span></div>
         <div class="hint err" id="amount-err" hidden>Bitte einen gültigen Betrag eingeben, z. B. 12,50</div>
       </div>
       <div class="field" id="sug-field"></div>
-      <div class="field"><div class="field-label">Kategorie</div><div class="cat-grid" id="cat-grid"></div><div class="hint err" id="cat-err" hidden>Bitte eine Kategorie antippen.</div></div>
+      ${draft.split
+        ? '<div class="field"><div class="field-label">Aufteilung</div><div class="pot-parts in-sheet" id="split-box"></div><div class="hint">Ändert sich der Betrag, wird anteilig neu verteilt.</div></div>'
+        : '<div class="field"><div class="field-label">Kategorie</div><div class="cat-grid" id="cat-grid"></div><div class="hint err" id="cat-err" hidden>Bitte eine Kategorie antippen.</div></div>'}
       <div class="field"><label for="note">Notiz <span class="muted">(optional)</span></label><input id="note" class="input" maxlength="120" autocomplete="off" enterkeyhint="done" placeholder="z. B. REWE, Tanken, Kino" value="${esc(draft.note)}"></div>
       <div class="field"><div class="field-label">Datum</div><div class="date-row">
         <div class="seg" role="group" aria-label="Schnellwahl Datum">
@@ -837,7 +887,26 @@ function openEntrySheet(entry = null, preset = {}) {
   showSheet(!entry ? '#amount' : null);
 }
 
+function renderSplitBox() {
+  const box = $('#split-box', sheet);
+  if (!box) return;
+  const amount = L.parseAmount($('#amount', sheet)?.value ?? draft.amountText);
+  const split = amount ? L.rescaleSplit(draft.split, amount) : draft.split;
+  box.innerHTML = split
+    .map((p) => {
+      const k = catOrFallback(p.categoryId, draft.type);
+      return `<div class="pot-part"><span><span aria-hidden="true">${esc(k.emoji)}</span> ${esc(p.name)} <span class="muted">· ${esc(k.name)}</span></span><span class="num">${money(p.amount)}</span></div>`;
+    })
+    .join('');
+}
+
 function renderEntryParts() {
+  if (draft.split) {
+    renderSplitBox();
+    $('#sug-field', sheet).hidden = true;
+    draft.suggestions = [];
+    return;
+  }
   const cats = state.categories.filter((c) => c.type === draft.type);
   $('#cat-grid', sheet).innerHTML = cats
     .map((c) => `<button type="button" class="cat" data-action="entry-cat" data-id="${esc(c.id)}" aria-pressed="${draft.categoryId === c.id}"><span class="e" aria-hidden="true">${esc(c.emoji)}</span><span>${esc(c.name)}</span></button>`)
@@ -885,7 +954,7 @@ function saveEntry() {
     $('#amount-err', sheet).hidden = false;
     ok = false;
   }
-  if (!draft.categoryId || !cat(draft.categoryId) || cat(draft.categoryId).type !== draft.type) {
+  if (!draft.split && (!draft.categoryId || !cat(draft.categoryId) || cat(draft.categoryId).type !== draft.type)) {
     $('#cat-err', sheet).hidden = false;
     ok = false;
   }
@@ -902,7 +971,12 @@ function saveEntry() {
   let entries;
   let msg;
   if (draft.id) {
-    entries = state.entries.map((e) => (e.id === draft.id ? { ...e, type: draft.type, amount, categoryId: draft.categoryId, note: draft.note, date: draft.date } : e));
+    entries = state.entries.map((e) => {
+      if (e.id !== draft.id) return e;
+      // Topf-Buchung: Art und Aufteilung bleiben, der Betrag wird anteilig neu verteilt
+      if (e.split && e.split.length) return { ...e, amount, note: draft.note, date: draft.date, split: L.rescaleSplit(e.split, amount) };
+      return { ...e, type: draft.type, amount, categoryId: draft.categoryId, note: draft.note, date: draft.date };
+    });
     msg = 'Änderung gespeichert';
   } else {
     entries = [...state.entries, { id: L.newId(), type: draft.type, amount, date: draft.date, categoryId: draft.categoryId, note: draft.note, createdAt: nowIso }];
@@ -933,6 +1007,10 @@ function openContractSheet(contract = null, preset = {}) {
   draft = contract
     ? { kind: 'contract', id: contract.id, type: contract.type, amountText: L.centsToInput(contract.amount), name: contract.name, interval: contract.interval, anchor: contract.anchor, end: contract.end || '', categoryId: contract.categoryId, active: contract.active, note: contract.note || '' }
     : { kind: 'contract', id: null, type: preset.type || 'ausgabe', amountText: preset.amountText || '', name: preset.name || '', interval: 'monatlich', anchor: preset.anchor || t, end: '', categoryId: preset.categoryId || null, active: true, note: '' };
+  draft.pot = !!contract && L.isPot(contract);
+  draft.parts = draft.pot ? contract.parts.map((p) => ({ id: p.id, name: p.name, amountText: L.centsToInput(p.amount), per: p.per, categoryId: p.categoryId })) : [];
+  // Betrag folgt der Summe der Posten, bis man ihn selbst ändert
+  draft.amountTouched = draft.pot && Math.round(L.partsTotal(contract.parts, contract.interval)) !== contract.amount;
   const iv = Object.entries(L.INTERVALS);
   sheet.innerHTML = `
     <div class="sheet-head"><h2 id="sheet-title">${contract ? 'Fixkosten bearbeiten' : 'Neue Fixkosten'}</h2><button class="icon-btn flat" data-action="close-sheet" aria-label="Schließen">${ICON.close}</button></div>
@@ -942,7 +1020,8 @@ function openContractSheet(contract = null, preset = {}) {
         <button type="button" data-action="contract-type" data-type="einnahme" aria-pressed="${draft.type === 'einnahme'}">Einnahme</button>
       </div></div>
       <div class="field"><label for="c-name">Name</label><input id="c-name" class="input" maxlength="60" autocomplete="off" placeholder="z. B. Haftpflicht, Netflix, Gehalt" value="${esc(draft.name)}"><div class="hint err" id="name-err" hidden>Bitte einen Namen eingeben.</div></div>
-      <div class="field"><label for="amount">Betrag pro Zahlung</label>
+      <div class="field toggle-row" id="pot-toggle"><span><b>Topf mit Posten</b><br><span class="hint" style="margin:0">Überwiesen wird ein Betrag, die Übersicht verteilt ihn auf die Kategorien der Posten</span></span><label class="switch"><input type="checkbox" id="c-pot" ${draft.pot ? 'checked' : ''} aria-label="Topf mit Posten"><span></span></label></div>
+      <div class="field"><label for="amount" id="amount-label">Betrag pro Zahlung</label>
         <div class="amount-wrap"><input id="amount" class="input amount-input" inputmode="decimal" autocomplete="off" enterkeyhint="done" placeholder="0,00" value="${esc(draft.amountText)}"><span class="cur">€</span></div>
         <div class="hint err" id="amount-err" hidden>Bitte einen gültigen Betrag eingeben, z. B. 89,90</div>
       </div>
@@ -952,7 +1031,11 @@ function openContractSheet(contract = null, preset = {}) {
 
       <div class="field"><label for="c-anchor">${contract ? 'Erste Abbuchung' : 'Nächste Abbuchung'}</label><input id="c-anchor" class="input" type="date" value="${esc(draft.anchor)}">
         <div class="hint" id="anchor-hint"></div></div>
-      <div class="field"><div class="field-label">Kategorie</div><div class="cat-grid" id="cat-grid"></div><div class="hint err" id="cat-err" hidden>Bitte eine Kategorie antippen.</div></div>
+      <div class="field" id="cat-field"><div class="field-label">Kategorie</div><div class="cat-grid" id="cat-grid"></div><div class="hint err" id="cat-err" hidden>Bitte eine Kategorie antippen.</div></div>
+      <div class="field" id="parts-field" hidden><div class="field-label">Posten</div><div id="parts-list"></div>
+        <button type="button" class="btn small" data-action="part-add">+ Posten</button>
+        <div class="hint err" id="parts-err" hidden>Jeder Posten braucht Name, Betrag und Kategorie.</div>
+        <div class="calc num" id="parts-sum"></div></div>
       <div class="field"><label for="c-end">Endet am <span class="muted">(optional, z. B. gekündigt zum)</span></label><input id="c-end" class="input" type="date" value="${esc(draft.end)}"><div class="hint err" id="end-err" hidden>Das Ende liegt vor der ersten Abbuchung.</div></div>
       ${contract ? `<div class="field toggle-row"><span><b>Aktiv</b><br><span class="hint" style="margin:0">Pausiert = wird nicht mehr gebucht</span></span><label class="switch"><input type="checkbox" id="c-active" ${draft.active ? 'checked' : ''} aria-label="Aktiv"><span></span></label></div>` : ''}
       <div class="field"><label for="c-note">Notiz <span class="muted">(optional, z. B. Vertragsnummer, Kündigungsfrist)</span></label><input id="c-note" class="input" maxlength="200" autocomplete="off" value="${esc(draft.note)}"></div>
@@ -963,8 +1046,56 @@ function openContractSheet(contract = null, preset = {}) {
       <button class="btn primary" data-action="save-contract">Speichern</button>
     </div>`;
   renderContractCats();
+  renderParts();
+  applyPotMode();
   updateContractCalc();
   showSheet(contract ? null : '#c-name');
+}
+
+// ---- Topf-Posten im Fixkosten-Formular
+
+function renderParts() {
+  const list = $('#parts-list', sheet);
+  if (!list) return;
+  const perLabel = draft.interval === 'monatlich' ? 'pro Monat' : 'pro Zahlung';
+  const cats = state.categories.filter((c) => c.type === 'ausgabe');
+  list.innerHTML = draft.parts
+    .map(
+      (p, i) => `<div class="part-row" data-pi="${i}">
+        <div class="p-line"><input class="input p-name" maxlength="60" autocomplete="off" placeholder="z. B. Tanken" aria-label="Name des Postens" value="${esc(p.name)}">
+          <button type="button" class="icon-btn flat part-del" data-action="part-del" data-pi="${i}" aria-label="Posten ${esc(p.name)} entfernen">${ICON.close}</button></div>
+        <div class="p-line"><input class="input p-amount num" inputmode="decimal" autocomplete="off" placeholder="0,00 €" aria-label="Betrag" value="${esc(p.amountText)}">
+          <select class="input p-per" aria-label="Zeitraum"><option value="zahlung" ${p.per === 'zahlung' ? 'selected' : ''}>${perLabel}</option><option value="jahr" ${p.per === 'jahr' ? 'selected' : ''}>pro Jahr</option></select></div>
+        <select class="input p-cat" aria-label="Kategorie"><option value="" ${!p.categoryId ? 'selected' : ''}>Kategorie wählen …</option>${cats.map((c) => `<option value="${esc(c.id)}" ${p.categoryId === c.id ? 'selected' : ''}>${esc(c.emoji)} ${esc(c.name)}</option>`).join('')}</select>
+      </div>`,
+    )
+    .join('');
+}
+
+function readParts() {
+  sheet.querySelectorAll('.part-row').forEach((row) => {
+    const p = draft.parts[+row.dataset.pi];
+    if (!p) return;
+    p.name = $('.p-name', row).value.trim();
+    p.amountText = $('.p-amount', row).value;
+    p.per = $('.p-per', row).value;
+    p.categoryId = $('.p-cat', row).value || null;
+  });
+}
+
+function applyPotMode() {
+  const potAllowed = draft.type === 'ausgabe';
+  if (!potAllowed) draft.pot = false;
+  $('#pot-toggle', sheet).hidden = !potAllowed;
+  $('#c-pot', sheet).checked = draft.pot;
+  $('#cat-field', sheet).hidden = draft.pot;
+  $('#parts-field', sheet).hidden = !draft.pot;
+  $('#amount-label', sheet).textContent = draft.pot ? 'Überweisung in den Topf' : 'Betrag pro Zahlung';
+}
+
+/** Gültige Posten (Betrag lesbar) mit Cent-Beträgen, für Summen. */
+function parsedParts() {
+  return draft.parts.map((p) => ({ ...p, amount: L.parseAmount(p.amountText) })).filter((p) => p.amount);
 }
 
 function renderContractCats() {
@@ -982,10 +1113,21 @@ function readContractForm() {
   draft.note = $('#c-note', sheet).value.trim();
   const act = $('#c-active', sheet);
   if (act) draft.active = act.checked;
+  if (draft.pot) readParts();
 }
 
 function updateContractCalc() {
   readContractForm();
+  if (draft.pot) {
+    const total = Math.round(L.partsTotal(parsedParts(), draft.interval));
+    if (!draft.amountTouched && total > 0) {
+      draft.amountText = L.centsToInput(total);
+      $('#amount', sheet).value = draft.amountText;
+    }
+    const amt = L.parseAmount(draft.amountText);
+    const per = draft.interval === 'monatlich' ? 'pro Monat' : 'pro Zahlung';
+    $('#parts-sum', sheet).textContent = total > 0 ? `Posten ergeben ${L.formatMoney(total)} ${per}${amt && amt !== total ? `, überwiesen werden ${L.formatMoney(amt)}. Verteilt wird anteilig.` : '.'}` : '';
+  }
   const amount = L.parseAmount(draft.amountText);
   const calc = $('#calc', sheet);
   if (amount && draft.interval !== 'monatlich') {
@@ -1027,9 +1169,28 @@ async function saveContract() {
   flag('#c-anchor', null, !L.isValidISO(draft.anchor));
   const endBad = !!draft.end && (!L.isValidISO(draft.end) || (L.isValidISO(draft.anchor) && draft.end < draft.anchor));
   flag('#c-end', '#end-err', endBad);
-  const catOk = draft.categoryId && cat(draft.categoryId)?.type === draft.type;
-  $('#cat-err', sheet).hidden = !!catOk;
-  if (!catOk) ok = false;
+  let parts = null;
+  if (draft.pot) {
+    let partsOk = draft.parts.length > 0;
+    parts = [];
+    sheet.querySelectorAll('.part-row').forEach((row) => {
+      const p = draft.parts[+row.dataset.pi];
+      const amt = L.parseAmount(p.amountText);
+      const catGood = !!p.categoryId && cat(p.categoryId)?.type === 'ausgabe';
+      $('.p-name', row).classList.toggle('invalid', !p.name);
+      $('.p-amount', row).classList.toggle('invalid', amt === null);
+      $('.p-cat', row).classList.toggle('invalid', !catGood);
+      if (!p.name || amt === null || !catGood) partsOk = false;
+      else parts.push({ id: p.id || L.newId(), name: p.name, amount: amt, per: p.per === 'jahr' ? 'jahr' : 'zahlung', categoryId: p.categoryId });
+    });
+    $('#parts-err', sheet).hidden = partsOk;
+    if (!partsOk) ok = false;
+    else draft.categoryId = L.mainPartCategory(parts, draft.interval);
+  } else {
+    const catOk = draft.categoryId && cat(draft.categoryId)?.type === draft.type;
+    $('#cat-err', sheet).hidden = !!catOk;
+    if (!catOk) ok = false;
+  }
   if (!ok) return revealFirstError();
 
   const t = today();
@@ -1046,6 +1207,7 @@ async function saveContract() {
     active: draft.active,
     bookedThrough: existing ? existing.bookedThrough : null,
     note: draft.note,
+    ...(parts ? { parts } : {}),
     createdAt: existing ? existing.createdAt : new Date().toISOString(),
   };
   const due = contract.active ? L.occurrences(contract, contract.bookedThrough, t) : [];
@@ -1144,8 +1306,8 @@ async function deleteCategory() {
   const c = cat(draft.id);
   if (!c) return closeSheet();
   const fallback = cat(L.FALLBACK_CATEGORY[c.type]);
-  const n = state.entries.filter((e) => e.categoryId === c.id).length;
-  const m = state.contracts.filter((x) => x.categoryId === c.id).length;
+  const n = state.entries.filter(usesCat(c.id)).length;
+  const m = state.contracts.filter(usesCat(c.id)).length;
   if (n || m) {
     const go = await confirmDialog({
       title: `„${c.name}“ löschen?`,
@@ -1160,8 +1322,8 @@ async function deleteCategory() {
   commit({
     ...state,
     categories: state.categories.filter((x) => x.id !== c.id),
-    entries: state.entries.map((e) => (e.categoryId === c.id ? { ...e, categoryId: fallback.id } : e)),
-    contracts: state.contracts.map((x) => (x.categoryId === c.id ? { ...x, categoryId: fallback.id } : x)),
+    entries: state.entries.map(recat(c.id, fallback.id)),
+    contracts: state.contracts.map(recat(c.id, fallback.id)),
   });
   if (ui.catFilter === c.id) ui.catFilter = null;
   toast('Kategorie gelöscht', { undo: () => commit(prev) });
@@ -1508,10 +1670,27 @@ const actions = {
     draft.categoryId = draft.type === 'einnahme' ? 'gehalt' : null;
     if (!cat(draft.categoryId)) draft.categoryId = null;
     renderContractCats();
+    applyPotMode();
+    updateContractCalc();
   },
   'contract-interval': (el) => {
+    if (draft.pot) readParts();
     draft.interval = el.dataset.iv;
     sheet.querySelectorAll('[data-action="contract-interval"]').forEach((b) => b.setAttribute('aria-pressed', String(b === el)));
+    if (draft.pot) renderParts();
+    updateContractCalc();
+  },
+  'part-add': () => {
+    readParts();
+    draft.parts.push({ id: L.newId(), name: '', amountText: '', per: 'zahlung', categoryId: null });
+    renderParts();
+    $('#parts-err', sheet).hidden = true;
+    sheet.querySelector('.part-row:last-child .p-name')?.focus();
+  },
+  'part-del': (el) => {
+    readParts();
+    draft.parts.splice(+el.dataset.pi, 1);
+    renderParts();
     updateContractCalc();
   },
   'contract-cat': (el) => {
@@ -1580,7 +1759,27 @@ document.addEventListener('input', (ev) => {
   if (t.id === 'amount') {
     t.classList.remove('invalid');
     $('#amount-err', sheet).hidden = true;
-    if (draft.kind === 'contract') updateContractCalc();
+    if (draft.kind === 'contract') {
+      if (draft.pot) draft.amountTouched = t.value.trim() !== '';
+      updateContractCalc();
+    }
+    if (draft.kind === 'entry' && draft.split) renderSplitBox();
+  }
+  if (draft.kind === 'contract' && t.id === 'c-pot') {
+    readContractForm();
+    draft.pot = t.checked;
+    if (draft.pot && !draft.parts.length) {
+      draft.parts.push({ id: L.newId(), name: '', amountText: '', per: 'zahlung', categoryId: draft.categoryId && cat(draft.categoryId)?.type === 'ausgabe' ? draft.categoryId : null });
+      draft.amountTouched = false;
+    }
+    renderParts();
+    applyPotMode();
+    updateContractCalc();
+  }
+  if (draft.kind === 'contract' && t.closest?.('.part-row')) {
+    t.classList.remove('invalid');
+    $('#parts-err', sheet).hidden = true;
+    updateContractCalc();
   }
   if (draft.kind === 'entry' && t.id === 'note' && !draft.categoryTouched) {
     const learned = L.learnedCategory(state, draft.type, t.value);

@@ -589,3 +589,19 @@ select.input { appearance: none; }
 .fatal h1 { font-size: 22px; }
 
 a { color: var(--accent); }
+
+/* Töpfe */
+.pot-parts { display: grid; gap: 1px; margin: -6px 0 8px 52px; }
+.pot-parts.in-sheet { margin: 0; background: var(--card-2); border-radius: 12px; padding: 8px 12px; }
+.pot-part { display: flex; justify-content: space-between; gap: 12px; font-size: 13.5px; color: var(--text-2); padding: 3px 0; }
+.pot-part > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pot-part .num { flex: none; white-space: nowrap; }
+.pot-note { color: var(--text-3); font-size: 12.5px; }
+.pot-note > span:first-child { white-space: normal; }
+.part-row { display: grid; gap: 8px; background: var(--card-2); border-radius: 14px; padding: 10px; margin-bottom: 8px; }
+.part-row .input { background: var(--card); min-height: 44px; padding: 10px 12px; }
+.part-row .input.invalid { border-color: var(--neg); }
+.p-line { display: flex; gap: 8px; align-items: center; }
+.p-line .input { flex: 1; min-width: 0; }
+.p-line .p-per { flex: 0 0 auto; width: auto; }
+.part-del { flex: none; }

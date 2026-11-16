@@ -173,7 +173,7 @@ test('Fixkosten: Summen, Rücklage, Gruppen, Anstehendes', () => {
 
 test('summarize: Monat, Sparen getrennt, Fixanteil', () => {
   const s = baseState();
-  const e = (over) => ({ id: L.newId(), type: 'ausgabe', amount: 1000, date: '2026-11-10', categoryId: 'lebensmittel', note: '', createdAt: '', ...over });
+  const e = (over) => ({ id: L.newId(), type: 'ausgabe', amount: 1000, date: '2026-11-10', categoryId: 'shopping', note: '', createdAt: '', ...over });
   s.entries.push(
     e({ amount: 4250 }),
     e({ amount: 1750, categoryId: 'essen' }),
@@ -189,7 +189,7 @@ test('summarize: Monat, Sparen getrennt, Fixanteil', () => {
   assert.equal(m.saving, 50000);
   assert.equal(m.fixed, 1399);
   assert.equal(m.rest, 300000 - 7499 - 50000);
-  assert.equal(m.byCategory[0].category.id, 'lebensmittel');
+  assert.equal(m.byCategory[0].category.id, 'shopping');
   assert.ok(m.byCategory.some((b) => b.category.id === 'sonstiges'));
   assert.equal(L.savingsRate(m), Math.round(((300000 - 7499) / 300000) * 100));
   const y = L.summarize(s, '2026');
@@ -205,8 +205,8 @@ test('Vorschläge lernen aus Handeingaben', () => {
   const s = baseState();
   const e = (note, categoryId, date, createdAt = '') => ({ id: L.newId(), type: 'ausgabe', amount: 100, date, categoryId, note, createdAt });
   s.entries.push(
-    e('REWE', 'lebensmittel', '2026-11-01'),
-    e('rewe ', 'lebensmittel', '2026-11-03'),
+    e('REWE', 'shopping', '2026-11-01'),
+    e('rewe ', 'shopping', '2026-11-03'),
     e('Rewe', 'essen', '2026-11-05'),
     e('Tanken', 'mobilitaet', '2026-11-02'),
     { ...e('Netflix', 'abos', '2026-11-02'), contractId: 'n' },
@@ -225,7 +225,7 @@ test('Vorschläge lernen aus Handeingaben', () => {
 test('entriesFor: Suche und Sortierung', () => {
   const s = baseState();
   s.entries.push(
-    { id: 'a', type: 'ausgabe', amount: 1250, date: '2026-11-01', categoryId: 'lebensmittel', note: 'Edeka', createdAt: '1' },
+    { id: 'a', type: 'ausgabe', amount: 1250, date: '2026-11-01', categoryId: 'shopping', note: 'Edeka', createdAt: '1' },
     { id: 'b', type: 'ausgabe', amount: 500, date: '2026-11-03', categoryId: 'essen', note: 'Döner', createdAt: '2' },
     { id: 'c', type: 'ausgabe', amount: 700, date: '2026-11-03', categoryId: 'essen', note: '', createdAt: '3' },
   );
@@ -233,13 +233,13 @@ test('entriesFor: Suche und Sortierung', () => {
   assert.deepEqual(L.entriesFor(s, { query: 'döner' }).map((e) => e.id), ['b']);
   assert.deepEqual(L.entriesFor(s, { query: 'essen' }).map((e) => e.id), ['c', 'b']);
   assert.deepEqual(L.entriesFor(s, { query: '12,50' }).map((e) => e.id), ['a']);
-  assert.deepEqual(L.entriesFor(s, { categoryId: 'lebensmittel' }).map((e) => e.id), ['a']);
+  assert.deepEqual(L.entriesFor(s, { categoryId: 'shopping' }).map((e) => e.id), ['a']);
 });
 
 test('Sicherung: Rundlauf, Prüfung, Zusammenführen', () => {
   const s = baseState();
   s.contracts.push(contract());
-  s.entries.push({ id: 'x', type: 'ausgabe', amount: 1250, date: '2026-11-01', categoryId: 'lebensmittel', note: 'Edeka', createdAt: '1' });
+  s.entries.push({ id: 'x', type: 'ausgabe', amount: 1250, date: '2026-11-01', categoryId: 'shopping', note: 'Edeka', createdAt: '1' });
   const json = JSON.stringify(L.buildBackup(s));
   const v = L.validateState(JSON.parse(json));
   assert.equal(v.ok, true);
@@ -276,11 +276,11 @@ test('Sicherung: Rundlauf, Prüfung, Zusammenführen', () => {
 
 test('CSV: Excel-tauglich und sicher', () => {
   const s = baseState();
-  s.entries.push({ id: 'x', type: 'ausgabe', amount: 123456, date: '2026-11-01', categoryId: 'lebensmittel', note: '=HYPERLINK("x");1', createdAt: '' });
+  s.entries.push({ id: 'x', type: 'ausgabe', amount: 123456, date: '2026-11-01', categoryId: 'shopping', note: '=HYPERLINK("x");1', createdAt: '' });
   s.entries.push({ id: 'y', type: 'einnahme', amount: 5, date: '2026-10-01', categoryId: 'gehalt', note: 'Gehalt', createdAt: '' });
   const csv = L.buildCsv(s);
   assert.ok(csv.startsWith('﻿Datum;Typ;Betrag;Kategorie;Notiz;Fixkosten\r\n'));
   const lines = csv.slice(1).trim().split('\r\n');
   assert.equal(lines[1], '01.10.2026;Einnahme;0,05;Gehalt;Gehalt;');
-  assert.equal(lines[2], `01.11.2026;Ausgabe;-1234,56;Lebensmittel;"'=HYPERLINK(""x"");1";`);
+  assert.equal(lines[2], `01.11.2026;Ausgabe;-1234,56;Shopping;"'=HYPERLINK(""x"");1";`);
 });

@@ -3,7 +3,9 @@
 // Datumsangaben sind lokale Kalendertage im Format 'JJJJ-MM-TT' (Strings),
 // damit es keine Zeitzonenfehler gibt.
 
-export const SCHEMA_VERSION = 1;
+// 2 = Töpfe (contract.parts, entry.split). Ältere App-Versionen lehnen das ab,
+// statt die Aufteilung beim Abgleich stillschweigend zu verlieren.
+export const SCHEMA_VERSION = 2;
 export const MAX_AMOUNT_CENTS = 100_000_000; // 1 Mio. € als Plausibilitätsgrenze
 
 export const INTERVALS = {
@@ -16,7 +18,6 @@ export const INTERVALS = {
 export const FALLBACK_CATEGORY = { ausgabe: 'sonstiges', einnahme: 'einnahmen-sonstige' };
 
 export const DEFAULT_CATEGORIES = [
-  { id: 'lebensmittel', name: 'Lebensmittel', emoji: '🛒', type: 'ausgabe' },
   { id: 'essen', name: 'Essen & Trinken', emoji: '🍽️', type: 'ausgabe' },
   { id: 'wohnen', name: 'Wohnen', emoji: '🏠', type: 'ausgabe' },
   { id: 'mobilitaet', name: 'Auto & Mobilität', emoji: '🚗', type: 'ausgabe' },
@@ -258,6 +259,63 @@ export function nextOccurrence(contract, afterExclusive) {
   return null;
 }
 
+// ---------------------------------------------------------------- Töpfe
+// Ein Topf ist ein Vertrag mit Posten (contract.parts): Überwiesen wird nur der
+// Topf-Betrag, die Übersicht verteilt ihn aber auf die Kategorien der Posten.
+// Posten: {id, name, amount, per: 'zahlung' | 'jahr', categoryId}.
+
+export const isPot = (contract) => Array.isArray(contract.parts) && contract.parts.length > 0;
+
+/** Anteil eines Postens an einer Topf-Zahlung in Cent (kann Nachkommastellen haben). */
+export function partShare(part, interval) {
+  return part.per === 'jahr' ? (part.amount * intervalMonths(interval)) / 12 : part.amount;
+}
+
+/** Summe der Posten je Topf-Zahlung in Cent (kann Nachkommastellen haben). */
+export function partsTotal(parts, interval) {
+  return parts.reduce((a, p) => a + partShare(p, interval), 0);
+}
+
+/**
+ * Verteilt 'total' Cent anteilig nach 'weights' auf ganze Cent (größter Rest).
+ * Die Summe stimmt immer exakt.
+ */
+export function splitAmount(total, weights) {
+  if (!weights.length) return [];
+  const sum = weights.reduce((a, w) => a + Math.max(0, w), 0);
+  if (sum <= 0) return weights.map((_, i) => (i === 0 ? total : 0));
+  const raw = weights.map((w) => (total * Math.max(0, w)) / sum);
+  const out = raw.map(Math.floor);
+  let rest = total - out.reduce((a, b) => a + b, 0);
+  const order = raw.map((r, i) => [r - Math.floor(r), i]).sort((a, b) => b[0] - a[0] || a[1] - b[1]);
+  for (let k = 0; rest > 0; k = (k + 1) % order.length, rest--) out[order[k][1]]++;
+  return out;
+}
+
+/** Aufteilung einer Topf-Zahlung auf die Posten: [{name, categoryId, amount}], ohne Nullbeträge. */
+export function contractSplit(contract) {
+  const amounts = splitAmount(contract.amount, contract.parts.map((p) => partShare(p, contract.interval)));
+  return contract.parts.map((p, i) => ({ name: p.name, categoryId: p.categoryId, amount: amounts[i] })).filter((x) => x.amount > 0);
+}
+
+/** Kategorie des größten Postens (dient als Hauptkategorie des Topfs). */
+export function mainPartCategory(parts, interval) {
+  let best = null;
+  for (const p of parts) if (!best || partShare(p, interval) > partShare(best, interval)) best = p;
+  return best ? best.categoryId : null;
+}
+
+/** Verteilt eine Topf-Buchung anteilig auf einen neuen Betrag. */
+export function rescaleSplit(split, amount) {
+  const amounts = splitAmount(amount, split.map((x) => x.amount));
+  return split.map((x, i) => ({ ...x, amount: amounts[i] })).filter((x) => x.amount > 0);
+}
+
+/** Teile einer Buchung: bei Topf-Buchungen die Posten, sonst die Buchung selbst. */
+export function entryPieces(e) {
+  return e.split && e.split.length ? e.split : [{ name: e.note, categoryId: e.categoryId, amount: e.amount }];
+}
+
 /** Durchschnittliche Kosten pro Monat in Cent (kann Nachkommastellen haben). */
 export function contractPerMonth(contract) {
   return contract.amount / intervalMonths(contract.interval);
@@ -301,6 +359,7 @@ export function bookDueContracts(state, today, nowIso = new Date().toISOString()
         categoryId: c.categoryId,
         note: c.name,
         contractId: c.id,
+        ...(isPot(c) ? { split: contractSplit(c) } : {}),
         createdAt: nowIso,
       });
       added++;
@@ -343,18 +402,29 @@ export function contractTotals(state, today) {
       t.expenseMonth += pm;
       t.expenseYear += py;
       if (intervalMonths(c.interval) > 1) t.reserveMonth += pm;
-      if (cats.get(c.categoryId)?.saving) t.savingMonth += pm;
+      if (isPot(c)) {
+        const total = partsTotal(c.parts, c.interval);
+        const saved = c.parts.filter((p) => cats.get(p.categoryId)?.saving).reduce((a, p) => a + partShare(p, c.interval), 0);
+        if (total > 0) t.savingMonth += (pm * saved) / total;
+      } else if (cats.get(c.categoryId)?.saving) t.savingMonth += pm;
     }
   }
   return t;
 }
 
-/** Laufende Verträge nach Kategorie gruppiert, größte Gruppe zuerst. */
+/** Laufende Töpfe, größter zuerst. */
+export function runningPots(state, today) {
+  return state.contracts
+    .filter((c) => isPot(c) && isContractRunning(c, today))
+    .sort((a, b) => contractPerMonth(b) - contractPerMonth(a) || a.name.localeCompare(b.name, 'de'));
+}
+
+/** Laufende Verträge (ohne Töpfe) nach Kategorie gruppiert, größte Gruppe zuerst. */
 export function contractGroups(state, today, type = 'ausgabe') {
   const cats = categoryMap(state);
   const groups = new Map();
   for (const c of state.contracts) {
-    if (c.type !== type || !isContractRunning(c, today)) continue;
+    if (c.type !== type || isPot(c) || !isContractRunning(c, today)) continue;
     const cat = cats.get(c.categoryId) || cats.get(FALLBACK_CATEGORY[type]);
     const key = cat ? cat.id : 'unbekannt';
     if (!groups.has(key)) groups.set(key, { category: cat, contracts: [], perMonth: 0, perYear: 0 });
@@ -389,14 +459,16 @@ export function summarize(state, match) {
       incByCat.set(e.categoryId, (incByCat.get(e.categoryId) || 0) + e.amount);
       continue;
     }
-    const cat = cats.get(e.categoryId);
-    if (cat?.saving) {
-      res.saving += e.amount;
-      continue;
+    // Topf-Buchungen zählen anteilig bei den Kategorien ihrer Posten
+    for (const p of entryPieces(e)) {
+      if (cats.get(p.categoryId)?.saving) {
+        res.saving += p.amount;
+        continue;
+      }
+      res.expense += p.amount;
+      if (e.contractId) res.fixed += p.amount;
+      byCat.set(p.categoryId, (byCat.get(p.categoryId) || 0) + p.amount);
     }
-    res.expense += e.amount;
-    if (e.contractId) res.fixed += e.amount;
-    byCat.set(e.categoryId, (byCat.get(e.categoryId) || 0) + e.amount);
   }
   res.rest = res.income - res.expense - res.saving;
   const toList = (map, type) =>
@@ -430,10 +502,11 @@ export function entriesFor(state, { match = null, categoryId = null, query = '' 
   return state.entries
     .filter((e) => {
       if (match && !e.date.startsWith(match)) return false;
-      if (categoryId && e.categoryId !== categoryId) return false;
+      if (categoryId && !entryPieces(e).some((p) => p.categoryId === categoryId)) return false;
       if (q) {
         const cat = cats.get(e.categoryId);
-        const hay = `${e.note || ''} ${cat ? cat.name : ''} ${formatMoney(e.amount)} ${centsToInput(e.amount)}`.toLocaleLowerCase('de');
+        const parts = (e.split || []).map((p) => `${p.name} ${cats.get(p.categoryId)?.name || ''}`).join(' ');
+        const hay = `${e.note || ''} ${cat ? cat.name : ''} ${parts} ${formatMoney(e.amount)} ${centsToInput(e.amount)}`.toLocaleLowerCase('de');
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -516,6 +589,13 @@ export function validateState(raw) {
         ...(c.saving ? { saving: true } : {}),
       });
     }
+    // Seit Version 1.2 sind Lebensmittel und Essen & Trinken eine Kategorie
+    const remap = new Map();
+    if (seenCat.has('lebensmittel') && seenCat.has('essen')) {
+      categories.splice(categories.findIndex((c) => c.id === 'lebensmittel'), 1);
+      seenCat.delete('lebensmittel');
+      remap.set('lebensmittel', 'essen');
+    }
     // Auffangkategorien müssen existieren
     for (const def of DEFAULT_CATEGORIES) {
       if (Object.values(FALLBACK_CATEGORY).includes(def.id) && !seenCat.has(def.id)) {
@@ -524,7 +604,10 @@ export function validateState(raw) {
       }
     }
     const typeOf = new Map(categories.map((c) => [c.id, c.type]));
-    const fixCat = (id, type) => (typeOf.get(id) === type ? id : FALLBACK_CATEGORY[type]);
+    const fixCat = (id, type) => {
+      id = remap.get(id) || id;
+      return typeOf.get(id) === type ? id : FALLBACK_CATEGORY[type];
+    };
 
     const contracts = [];
     const seenContract = new Set();
@@ -536,6 +619,18 @@ export function validateState(raw) {
       if (!isValidISO(c.anchor)) return fail(`Vertrag „${c.name}“ hat kein gültiges Startdatum.`);
       if (c.end != null && c.end !== '' && !isValidISO(c.end)) return fail(`Vertrag „${c.name}“ hat ein ungültiges Enddatum.`);
       if (c.bookedThrough != null && !isValidISO(c.bookedThrough)) return fail(`Vertrag „${c.name}“ ist beschädigt.`);
+      let parts = null;
+      if (c.parts != null) {
+        if (!Array.isArray(c.parts) || c.parts.length > 50) return fail(`Topf „${c.name}“ ist beschädigt.`);
+        parts = [];
+        for (const p of c.parts) {
+          if (!p || typeof p.id !== 'string' || !p.id || !validCents(p.amount) || (p.per !== 'zahlung' && p.per !== 'jahr')) {
+            return fail(`Topf „${c.name}“ hat einen fehlerhaften Posten.`);
+          }
+          parts.push({ id: p.id, name: str(p.name, 60) || 'Posten', amount: p.amount, per: p.per, categoryId: fixCat(p.categoryId, c.type) });
+        }
+        if (!parts.length) parts = null;
+      }
       seenContract.add(c.id);
       contracts.push({
         id: c.id,
@@ -549,6 +644,7 @@ export function validateState(raw) {
         active: c.active !== false,
         bookedThrough: c.bookedThrough || null,
         note: str(c.note, 200),
+        ...(parts ? { parts } : {}),
         createdAt: typeof c.createdAt === 'string' ? c.createdAt : new Date().toISOString(),
       });
     }
@@ -560,6 +656,19 @@ export function validateState(raw) {
       if (e.type !== 'ausgabe' && e.type !== 'einnahme') return fail('Eine Buchung hat keinen gültigen Typ.');
       if (!validCents(e.amount)) return fail(`Buchung vom ${e.date} hat keinen gültigen Betrag.`);
       if (!isValidISO(e.date)) return fail('Eine Buchung hat ein ungültiges Datum.');
+      let split = null;
+      if (e.split != null) {
+        if (!Array.isArray(e.split) || e.split.length > 50) return fail(`Buchung vom ${e.date} ist beschädigt.`);
+        split = [];
+        let sum = 0;
+        for (const p of e.split) {
+          if (!p || !validCents(p.amount)) return fail(`Buchung vom ${e.date} hat eine fehlerhafte Aufteilung.`);
+          sum += p.amount;
+          split.push({ name: str(p.name, 60) || 'Posten', categoryId: fixCat(p.categoryId, e.type), amount: p.amount });
+        }
+        if (!split.length) split = null;
+        else if (sum !== e.amount) return fail(`Buchung vom ${e.date}: Aufteilung passt nicht zum Betrag.`);
+      }
       seenEntry.add(e.id);
       entries.push({
         id: e.id,
@@ -569,6 +678,7 @@ export function validateState(raw) {
         categoryId: fixCat(e.categoryId, e.type),
         note: str(e.note, 120),
         ...(typeof e.contractId === 'string' && e.contractId ? { contractId: e.contractId } : {}),
+        ...(split ? { split } : {}),
         createdAt: typeof e.createdAt === 'string' ? e.createdAt : new Date().toISOString(),
       });
     }
@@ -694,17 +804,23 @@ export function buildCsv(state) {
   const rows = [['Datum', 'Typ', 'Betrag', 'Kategorie', 'Notiz', 'Fixkosten']];
   const sorted = [...state.entries].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   for (const e of sorted) {
-    const signed = e.type === 'ausgabe' ? -e.amount : e.amount;
-    const abs = Math.abs(signed);
-    const amountTxt = `${signed < 0 ? '-' : ''}${Math.floor(abs / 100)},${String(abs % 100).padStart(2, '0')}`;
-    rows.push([
-      formatDate(e.date),
-      e.type === 'ausgabe' ? 'Ausgabe' : 'Einnahme',
-      amountTxt,
-      cats.get(e.categoryId)?.name || '',
-      e.note || '',
-      e.contractId ? contracts.get(e.contractId)?.name || 'ja' : '',
-    ]);
+    // Topf-Buchungen: eine Zeile je Posten, damit Excel nach Kategorie summieren kann
+    const pieces = e.split && e.split.length
+      ? e.split.map((p) => ({ amount: p.amount, categoryId: p.categoryId, note: `${e.note || ''} · ${p.name}` }))
+      : [{ amount: e.amount, categoryId: e.categoryId, note: e.note }];
+    for (const p of pieces) {
+      const signed = e.type === 'ausgabe' ? -p.amount : p.amount;
+      const abs = Math.abs(signed);
+      const amountTxt = `${signed < 0 ? '-' : ''}${Math.floor(abs / 100)},${String(abs % 100).padStart(2, '0')}`;
+      rows.push([
+        formatDate(e.date),
+        e.type === 'ausgabe' ? 'Ausgabe' : 'Einnahme',
+        amountTxt,
+        cats.get(p.categoryId)?.name || '',
+        p.note || '',
+        e.contractId ? contracts.get(e.contractId)?.name || 'ja' : '',
+      ]);
+    }
   }
   // Betrag bewusst nicht durch q(): "-12,50" soll als Zahl in Excel ankommen.
   return '﻿' + rows.map((r) => r.map((v, i) => (i === 2 && r !== rows[0] ? v : q(v))).join(';')).join('\r\n') + '\r\n';

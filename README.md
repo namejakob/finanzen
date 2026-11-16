@@ -44,6 +44,12 @@ und die Sicherungsdatei funktioniert unabhängig davon.
   Jahres- und Quartalszahlungen zurücklegen sollte.
 - **Übersicht**: Monat oder Jahr, Übrig, Sparquote, Ausgaben nach Kategorie,
   Monatsdiagramm, demnächst fällige Zahlungen.
+- **Töpfe** (z. B. Unterkonten bei der Bank): Fixkosten mit dem Schalter „Topf mit
+  Posten“. Gebucht wird nur die Überweisung in den Topf, die Übersicht verteilt sie
+  anteilig auf die Kategorien der Posten (Tanken → Auto, Hundesteuer → Hund).
+  Posten gibt es pro Monat oder pro Jahr. Weicht die Überweisung von der Summe der
+  Posten ab, wird anteilig verteilt. Was aus einem Topf bezahlt wird, nicht noch
+  einmal eintragen.
 - **Sparen & Anlegen** zählt nicht als Ausgabe, sondern wird als „Gespart“ ausgewiesen.
 - **Sicherung** als JSON-Datei speichern und laden (ersetzen oder ergänzen),
   Export als CSV für Excel. Erinnerung nach 30 Tagen ohne Sicherung.

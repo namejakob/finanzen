@@ -30,7 +30,7 @@ const entry = (id, amount, extra = {}) => ({
   type: 'ausgabe',
   amount,
   date: '2026-11-10',
-  categoryId: 'lebensmittel',
+  categoryId: 'shopping',
   note: id,
   createdAt: '2026-11-10T10:00:00.000Z',
   ...extra,
