@@ -1,8 +1,12 @@
 // Oberfläche der Finanz-App. Rechenlogik: logic.js, Speicher: store.js.
 import * as L from './logic.js';
 import * as S from './store.js';
+import * as Y from './sync.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
+const SYNC_HOST = 'finanzen.jakobg.de';
+// Abgleich nur unter der eigenen Adresse (dort läuft der Server) und lokal zum Testen
+const SYNC_AVAILABLE = [SYNC_HOST, 'localhost', '127.0.0.1'].includes(location.hostname);
 
 // ---------------------------------------------------------------- Zustand
 
@@ -44,7 +48,7 @@ const ICON = {
 // ---------------------------------------------------------------- Speichern
 
 let saveFailed = false;
-async function commit(next) {
+async function commit(next, { fromSync = false } = {}) {
   // Jede Änderung macht ältere Rückgängig-Knöpfe ungültig (sie würden sonst
   // auch alles verwerfen, was danach passiert ist).
   document.querySelectorAll('.toast.undoable').forEach((t) => t.remove());
@@ -57,6 +61,7 @@ async function commit(next) {
       toast('Wieder gespeichert.');
     }
     channel?.postMessage('changed');
+    if (!fromSync) scheduleSync();
     if (ui.persisted !== true) ui.persisted = await S.requestPersistence();
   } catch (err) {
     console.error(err);
@@ -68,11 +73,108 @@ async function commit(next) {
 /** Bucht fällige Fixkosten. Gibt zurück, ob sich etwas geändert hat. */
 function runBooking() {
   const r = L.bookDueContracts(state, today());
-  if (r.added > 0) {
-    state = r.state;
-    return r.added;
+  const changed = r.state !== state;
+  state = r.state;
+  return { added: r.added, changed };
+}
+
+// ---------------------------------------------------------------- Abgleich (Sync)
+
+const sync = { cfg: null, keys: null, running: null, again: false, timer: null, error: null, showKey: false };
+const sameState = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const normalized = (s) => L.validateState(s).state;
+
+async function loadSyncConfig() {
+  if (!SYNC_AVAILABLE) return;
+  try {
+    const cfg = await S.loadSync();
+    if (cfg && Y.parseKey(cfg.key)) {
+      if (!sync.keys || sync.cfg?.key !== cfg.key) sync.keys = await Y.deriveKeys(cfg.key);
+      sync.cfg = cfg;
+    } else {
+      sync.cfg = null;
+      sync.keys = null;
+    }
+  } catch (err) {
+    console.warn('Sync-Einstellungen nicht lesbar', err);
   }
-  return 0;
+}
+
+function scheduleSync(delay = 1500) {
+  if (!sync.cfg) return;
+  clearTimeout(sync.timer);
+  sync.timer = setTimeout(() => runSync(), delay);
+}
+
+/**
+ * Gleicht mit dem Server ab. mode 'create' legt den Speicherplatz an,
+ * 'join' verlangt, dass es ihn schon gibt. Wirft nur bei create/join.
+ */
+async function runSync(mode = 'sync') {
+  if (mode === 'sync') await loadSyncConfig(); // ein anderer Tab kann weiter sein
+  if (!sync.cfg || !state) return;
+  if (sync.running) {
+    sync.again = true;
+    return sync.running;
+  }
+  clearTimeout(sync.timer);
+  sync.running = (async () => {
+    const snapshot = state;
+    refreshSyncStatus('läuft');
+    try {
+      const r = await Y.syncOnce({ keys: sync.keys, local: snapshot, base: sync.cfg.base || null, mode });
+      // Was während des Abgleichs hier eingetragen wurde, bleibt erhalten
+      let next = r.state;
+      if (state !== snapshot) next = normalized(L.mergeThreeWay(normalized(snapshot), normalized(state), r.state));
+      sync.cfg = { ...sync.cfg, base: r.state, rev: r.rev, lastSyncAt: new Date().toISOString() };
+      await S.saveSync(sync.cfg);
+      const booked = L.bookDueContracts(next, today());
+      next = booked.state;
+      sync.error = null;
+      sync.warned = null;
+      if (!sameState(next, normalized(state))) {
+        const pulled = !sameState(r.state, normalized(snapshot));
+        await commit(next, { fromSync: true });
+        if (pulled && mode === 'sync') toast('Vom anderen Gerät übernommen.', { duration: 2500 });
+      }
+      // Hier ist noch etwas Neues, das der Server nicht hat
+      if (!sameState(next, r.state)) sync.again = true;
+    } catch (err) {
+      sync.error = err;
+      if (mode !== 'sync') throw err;
+      if (err.code !== 'offline') console.warn('Abgleich fehlgeschlagen', err);
+      // Ernste Fehler einmal melden, nicht bei jedem Versuch
+      if (['auth', 'decrypt', 'notfound', 'invalid', 'format'].includes(err.code) && sync.warned !== err.code) {
+        sync.warned = err.code;
+        toast('Abgleich gestört: ' + Y.errorText(err) + ' Details unter „Mehr“.', { error: true, duration: 10000 });
+      }
+    } finally {
+      sync.running = null;
+      refreshSyncStatus();
+      if (sync.again) {
+        sync.again = false;
+        scheduleSync(300);
+      }
+    }
+  })();
+  return sync.running;
+}
+
+function syncStatusText(override) {
+  if (override) return 'Abgleich läuft …';
+  if (sync.error) return Y.errorText(sync.error);
+  const last = sync.cfg?.lastSyncAt;
+  if (!last) return 'Noch nicht abgeglichen.';
+  const d = new Date(last);
+  const sameDay = d.toDateString() === new Date().toDateString();
+  return `Zuletzt abgeglichen: ${sameDay ? 'heute' : d.toLocaleDateString('de-DE')}, ${d.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' })} Uhr`;
+}
+function refreshSyncStatus(override) {
+  const el = document.getElementById('sync-status');
+  if (el) {
+    el.textContent = syncStatusText(override);
+    el.classList.toggle('err', !override && !!sync.error && sync.error.code !== 'offline');
+  }
 }
 
 // ---------------------------------------------------------------- Start
@@ -98,8 +200,9 @@ async function init() {
   } else {
     state = L.createInitialState();
   }
-  const added = runBooking();
-  if (added || !raw) await commit(state);
+  await loadSyncConfig();
+  const { added, changed } = runBooking();
+  if (changed || !raw) await commit(state);
   else render();
   if (added) toast(`${added} fällige Fixkosten gebucht.`);
 
@@ -107,6 +210,7 @@ async function init() {
     ui.beforeImport = await S.loadBeforeImport();
   } catch {}
   ui.persisted = await S.isPersisted();
+  runSync();
 
   const params = new URLSearchParams(location.search);
   if (params.has('neu')) {
@@ -133,18 +237,24 @@ function fatal(message, raw, err) {
 // Neuer Tag, während die App offen war (z. B. über Nacht im Hintergrund)
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible' || !state) return;
+  runSync(); // Änderungen vom anderen Gerät holen
   const t = today();
   if (t === ui.lastToday) return;
   const oldMonth = L.monthKey(ui.lastToday);
   ui.lastToday = t;
   if (ui.month === oldMonth) ui.month = L.monthKey(t);
   if (ui.year === L.yearOf(oldMonth + '-01')) ui.year = L.yearOf(t);
-  const added = runBooking();
-  if (added) {
-    commit(state);
-    toast(`${added} fällige Fixkosten gebucht.`);
-  } else render();
+  const { added, changed } = runBooking();
+  if (changed) commit(state);
+  else render();
+  if (added) toast(`${added} fällige Fixkosten gebucht.`);
 });
+
+// Abgleich: wieder online, und jede Minute, solange die App sichtbar ist
+window.addEventListener('online', () => runSync());
+setInterval(() => {
+  if (document.visibilityState === 'visible') runSync();
+}, 60_000);
 
 // Änderungen aus einem anderen Tab übernehmen
 channel?.addEventListener('message', async (ev) => {
@@ -496,10 +606,16 @@ function renderMore() {
       )
       .join('');
   const before = ui.beforeImport;
+  const synced = !!sync.cfg;
   return `<div class="head"><h1>Mehr</h1></div><div class="grid">
+    ${renderSyncCard()}
     <section class="card">
       <h2 class="card-title">Sicherung</h2>
-      <p class="info">Deine Daten liegen <b>nur auf diesem Gerät</b>. Speichere regelmäßig eine Sicherungsdatei und leg sie aufs NAS. Geht das Handy verloren, ist das die einzige Kopie.</p>
+      <p class="info">${
+        synced
+          ? 'Deine Daten liegen auf deinen verbundenen Geräten und verschlüsselt auf deinem Server. Eine Sicherungsdatei auf dem NAS schützt zusätzlich, etwa wenn du den Sync-Schlüssel verlierst.'
+          : 'Deine Daten liegen <b>nur auf diesem Gerät</b>. Speichere regelmäßig eine Sicherungsdatei und leg sie aufs NAS. Geht das Handy verloren, ist das die einzige Kopie.'
+      }</p>
       <p class="info">${last ? `Letzte Sicherung: ${esc(new Date(last).toLocaleDateString('de-DE'))}` : 'Noch keine Sicherung gespeichert.'}</p>
       <div class="btn-col" style="display:grid;gap:8px;margin-top:14px">
         <button class="btn primary" data-action="backup">Sicherung speichern</button>
@@ -516,17 +632,156 @@ function renderMore() {
     </section>
     <section class="card">
       <h2 class="card-title">Datenschutz</h2>
-      <p class="info">Die App sendet nichts ins Internet. Es gibt kein Konto, keinen Server und keine Statistik. Technisch ist ihr nur erlaubt, ihre eigenen Programmdateien zu laden.</p>
+      <p class="info">${
+        synced
+          ? 'Ins Internet geht nur der Abgleich, und zwar verschlüsselt an deinen eigenen Server. Der Schlüssel bleibt auf deinen Geräten, der Server kann nichts lesen. Kein Konto, keine Statistik, keine fremden Dienste.'
+          : 'Die App sendet nichts ins Internet. Es gibt kein Konto und keine Statistik. Technisch ist ihr nur erlaubt, mit ihrer eigenen Adresse zu sprechen.'
+      }</p>
       <p class="info">Gespeichert in: ${esc(S.storageKind())} · ${ui.persisted === true ? 'vor automatischem Löschen geschützt ✓' : ui.persisted === false ? 'nicht dauerhaft geschützt, deshalb Sicherungen besonders wichtig' : 'Schutzstatus unbekannt'}</p>
       <p class="info">${nB(state.entries.length)} · ${state.contracts.length} Fixkosten</p>
     </section>
     <section class="card">
       <h2 class="card-title">Gefahrenzone</h2>
-      <p class="info">Löscht alle Buchungen, Fixkosten und Kategorien auf diesem Gerät. Ein Rückgängig-Punkt bleibt bis zum nächsten Import erhalten.</p>
+      <p class="info">Löscht alle Buchungen, Fixkosten und Kategorien auf diesem Gerät${synced ? ' <b>und auf allen verbundenen Geräten</b>' : ''}. Ein Rückgängig-Punkt bleibt bis zum nächsten Import erhalten.</p>
       <p style="margin:14px 0 0"><button class="btn danger block" data-action="wipe">Alle Daten löschen</button></p>
     </section>
   </div>
   <p class="version">Finanzen ${APP_VERSION}</p>`;
+}
+
+function renderSyncCard() {
+  if (!SYNC_AVAILABLE) {
+    return `<section class="card">
+      <h2 class="card-title">Handy und Laptop abgleichen</h2>
+      <p class="info">Der Abgleich zwischen Geräten läuft unter der eigenen Adresse <a href="https://${SYNC_HOST}/">${SYNC_HOST}</a>. Umziehen: hier „Sicherung speichern“, dort „Sicherung laden“.</p>
+    </section>`;
+  }
+  if (!sync.cfg) {
+    return `<section class="card">
+      <h2 class="card-title">Handy und Laptop abgleichen</h2>
+      <p class="info">Gleicht deine Daten verschlüsselt über deinen Server ab. Auf dem ersten Gerät einrichten, auf jedem weiteren mit dem Sync-Schlüssel verbinden.</p>
+      <div style="display:grid;gap:8px;margin-top:14px">
+        <button class="btn primary" data-action="sync-create">Einrichten (erstes Gerät)</button>
+        <button class="btn" data-action="sync-join">Mit Sync-Schlüssel verbinden</button>
+      </div>
+    </section>`;
+  }
+  const err = sync.error && sync.error.code !== 'offline';
+  return `<section class="card">
+    <h2 class="card-title">Handy und Laptop abgleichen</h2>
+    <p class="info${err ? ' err' : ''}" id="sync-status">${esc(syncStatusText(sync.running ? 'läuft' : null))}</p>
+    ${
+      sync.showKey
+        ? `<div class="note-box" style="margin-top:10px"><div class="field-label">Dein Sync-Schlüssel</div>
+            <div style="font:600 17px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;letter-spacing:.02em;word-break:break-all;user-select:all;margin:4px 0 8px">${esc(sync.cfg.key)}</div>
+            <div class="hint">Damit verbindest du weitere Geräte. Leg ihn in deinen Passwortmanager. Wer ihn hat, kann deine Finanzdaten lesen.</div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px"><button class="btn" data-action="sync-copy">Kopieren</button><button class="btn" data-action="sync-hide">Ausblenden</button></div></div>`
+        : ''
+    }
+    <div style="display:grid;gap:8px;margin-top:14px">
+      <button class="btn primary" data-action="sync-now">Jetzt abgleichen</button>
+      ${sync.showKey ? '' : '<button class="btn" data-action="sync-show">Sync-Schlüssel anzeigen</button>'}
+      <button class="btn" data-action="sync-off">Abgleich auf diesem Gerät beenden</button>
+    </div>
+  </section>`;
+}
+
+function openSyncJoinSheet() {
+  draft = { kind: 'sync' };
+  sheet.innerHTML = `
+    <div class="sheet-head"><h2 id="sheet-title">Mit Sync-Schlüssel verbinden</h2><button class="icon-btn flat" data-action="close-sheet" aria-label="Schließen">${ICON.close}</button></div>
+    <form class="sheet-body" novalidate>
+      <div class="field"><label for="sync-key">Sync-Schlüssel</label>
+        <input id="sync-key" class="input" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ABCD-EFGH-…" style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace">
+        <div class="hint">Steht auf dem ersten Gerät unter „Mehr → Sync-Schlüssel anzeigen“. Groß- und Kleinschreibung und Bindestriche sind egal.</div>
+        <div class="hint err" id="sync-key-err" hidden></div>
+      </div>
+      ${state.entries.length || state.contracts.length ? `<div class="note-box">Auf diesem Gerät sind schon ${nB(state.entries.length)}. Sie bleiben erhalten und kommen zu den Daten des anderen Geräts dazu.</div>` : ''}
+    </form>
+    <div class="sheet-foot"><button class="btn primary" data-action="save-sync-join">Verbinden</button></div>`;
+  showSheet('#sync-key');
+}
+
+async function syncJoin() {
+  const input = $('#sync-key', sheet);
+  const errEl = $('#sync-key-err', sheet);
+  const btn = $('[data-action="save-sync-join"]', sheet);
+  const key = Y.parseKey(input.value);
+  const fail = (msg) => {
+    input.classList.add('invalid');
+    errEl.textContent = msg;
+    errEl.hidden = false;
+    btn.disabled = false;
+    btn.textContent = 'Verbinden';
+  };
+  if (!key) return fail('Das ist kein gültiger Schlüssel. Er hat 32 Zeichen (A–Z und 2–7).');
+  btn.disabled = true;
+  btn.textContent = 'Verbinde …';
+  const formatted = Y.formatKey(key);
+  sync.keys = await Y.deriveKeys(formatted);
+  sync.cfg = { key: formatted, base: null, rev: 0, lastSyncAt: null };
+  try {
+    await runSync('join');
+  } catch (err) {
+    sync.cfg = null;
+    sync.keys = null;
+    sync.error = null;
+    return fail(Y.errorText(err));
+  }
+  closeSheet();
+  toast(`Verbunden. ${nB(state.entries.length)} auf diesem Gerät.`, { duration: 6000 });
+  render();
+}
+
+async function syncCreate() {
+  const go = await confirmDialog({
+    title: 'Abgleich einrichten?',
+    text: 'Deine Daten werden auf diesem Gerät verschlüsselt und auf deinem Server abgelegt. Du bekommst einen Sync-Schlüssel, mit dem du den Laptop verbindest. Ohne diesen Schlüssel kann niemand die Daten lesen, auch der Server nicht.',
+    ok: 'Einrichten',
+  });
+  if (!go) return;
+  const key = Y.generateKey();
+  sync.keys = await Y.deriveKeys(key);
+  sync.cfg = { key, base: null, rev: 0, lastSyncAt: null };
+  try {
+    await runSync('create');
+  } catch (err) {
+    sync.cfg = null;
+    sync.keys = null;
+    sync.error = null;
+    render();
+    return toast('Einrichten fehlgeschlagen: ' + Y.errorText(err), { error: true, duration: 8000 });
+  }
+  sync.showKey = true;
+  render();
+  toast('Abgleich eingerichtet. Jetzt den Schlüssel am Laptop eingeben.', { duration: 7000 });
+}
+
+async function syncOff() {
+  const go = await confirmDialog({
+    title: 'Abgleich hier beenden?',
+    text: 'Dieses Gerät gleicht dann nicht mehr ab. Die Daten auf diesem Gerät, den anderen Geräten und dem Server bleiben, wie sie sind. Mit dem Sync-Schlüssel kannst du dich jederzeit wieder verbinden.',
+    ok: 'Beenden',
+  });
+  if (!go) return;
+  clearTimeout(sync.timer);
+  if (sync.running) await sync.running.catch(() => {});
+  await S.clearSync();
+  sync.cfg = null;
+  sync.keys = null;
+  sync.error = null;
+  sync.showKey = false;
+  render();
+  toast('Abgleich auf diesem Gerät beendet.');
+}
+
+async function syncCopy() {
+  try {
+    await navigator.clipboard.writeText(sync.cfg.key);
+    toast('Schlüssel kopiert.');
+  } catch {
+    toast('Kopieren ging nicht. Markier den Schlüssel und kopier ihn von Hand.', { error: true });
+  }
 }
 
 function usageText(id) {
@@ -1080,7 +1335,7 @@ importInput.addEventListener('change', async () => {
   const hasData = state.entries.length || state.contracts.length;
   const choice = await choiceDialog({
     title: 'Sicherung laden',
-    text: `Datei${when}: ${nB(inc.entries.length)}, ${inc.contracts.length} Fixkosten.\n\n${hasData ? `Auf diesem Gerät sind gerade ${nB(state.entries.length)} und ${state.contracts.length} Fixkosten.\n\n„Ersetzen“ stellt genau den Stand der Datei her. „Ergänzen“ fügt nur hinzu, was hier noch fehlt.` : 'Auf diesem Gerät ist noch nichts gespeichert.'}`,
+    text: `Datei${when}: ${nB(inc.entries.length)}, ${inc.contracts.length} Fixkosten.\n\n${hasData ? `Auf diesem Gerät sind gerade ${nB(state.entries.length)} und ${state.contracts.length} Fixkosten.\n\n„Ersetzen“ stellt genau den Stand der Datei her. „Ergänzen“ fügt nur hinzu, was hier noch fehlt.` : 'Auf diesem Gerät ist noch nichts gespeichert.'}${sync.cfg ? '\n\nDer Abgleich überträgt das Ergebnis auch auf deine anderen Geräte.' : ''}`,
     buttons: hasData
       ? [{ label: 'Ersetzen', value: 'replace', variant: 'primary' }, { label: 'Ergänzen', value: 'merge' }, { label: 'Abbrechen', value: null }]
       : [{ label: 'Laden', value: 'replace', variant: 'primary' }, { label: 'Abbrechen', value: null }],
@@ -1128,7 +1383,7 @@ async function undoImport() {
 async function wipe() {
   const go = await confirmDialog({
     title: 'Wirklich alles löschen?',
-    text: 'Alle Buchungen, Fixkosten und eigenen Kategorien auf diesem Gerät werden gelöscht. Speichere vorher eine Sicherung, wenn du die Daten noch brauchst.',
+    text: `Alle Buchungen, Fixkosten und eigenen Kategorien auf diesem Gerät${sync.cfg ? ' und über den Abgleich auch auf deinen anderen Geräten' : ''} werden gelöscht. Speichere vorher eine Sicherung, wenn du die Daten noch brauchst.`,
     ok: 'Alles löschen',
     danger: true,
   });
@@ -1283,6 +1538,27 @@ const actions = {
   import: () => importInput.click(),
   'undo-import': () => undoImport(),
   wipe: () => wipe(),
+
+  'sync-create': () => syncCreate(),
+  'sync-join': () => openSyncJoinSheet(),
+  'save-sync-join': () => syncJoin(),
+  'sync-now': async (el) => {
+    el.disabled = true;
+    sync.warned = null;
+    await runSync();
+    render();
+    if (!sync.error) toast('Abgeglichen.', { duration: 2000 });
+  },
+  'sync-show': () => {
+    sync.showKey = true;
+    render();
+  },
+  'sync-hide': () => {
+    sync.showKey = false;
+    render();
+  },
+  'sync-copy': () => syncCopy(),
+  'sync-off': () => syncOff(),
 };
 
 document.addEventListener('click', (ev) => {
@@ -1343,6 +1619,7 @@ sheet.addEventListener('keydown', (ev) => {
     }
     saveEntry();
   } else if (draft.kind === 'contract') saveContract();
+  else if (draft.kind === 'sync') syncJoin();
   else saveCategory();
 });
 

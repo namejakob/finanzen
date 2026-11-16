@@ -91,6 +91,10 @@ export const saveState = (state) => enqueue(() => idbSet('state', structuredClon
 export const loadBeforeImport = () => idbGet('before-import');
 export const saveBeforeImport = (state) => enqueue(() => idbSet('before-import', { savedAt: new Date().toISOString(), state: structuredClone(state) }));
 export const clearBeforeImport = () => enqueue(() => idbDelete('before-import'));
+// Abgleich: Sync-Schlüssel, letzter gemeinsamer Stand und Revision
+export const loadSync = () => idbGet('sync');
+export const saveSync = (cfg) => enqueue(() => idbSet('sync', structuredClone(cfg)));
+export const clearSync = () => enqueue(() => idbDelete('sync'));
 export const wipeAll = () => enqueue(async () => {
   await idbDelete('state');
   await idbDelete('before-import');

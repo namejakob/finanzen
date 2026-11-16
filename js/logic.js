@@ -282,13 +282,19 @@ export function isContractRunning(contract, today) {
 export function bookDueContracts(state, today, nowIso = new Date().toISOString()) {
   let added = 0;
   const newEntries = [];
+  const existing = new Set(state.entries.map((e) => e.id));
   const contracts = state.contracts.map((c) => {
     if (!c.active) return c;
     const dates = occurrences(c, c.bookedThrough || null, today);
     if (!dates.length) return c;
     for (const date of dates) {
+      // Feste ID je Vertrag und Fälligkeit: Buchen zwei synchronisierte Geräte
+      // dieselbe Zahlung, entsteht dieselbe Buchung statt einer doppelten.
+      const id = contractEntryId(c.id, date);
+      if (existing.has(id)) continue;
+      existing.add(id);
       newEntries.push({
-        id: newId(),
+        id,
         type: c.type,
         amount: c.amount,
         date,
@@ -301,7 +307,11 @@ export function bookDueContracts(state, today, nowIso = new Date().toISOString()
     }
     return { ...c, bookedThrough: dates[dates.length - 1] };
   });
-  if (!added) return { state, added: 0 };
+  if (!added) {
+    // Evtl. nur den Buchungsstand vorgerückt (Zahlung war schon da)
+    const moved = contracts.some((c, i) => c !== state.contracts[i]);
+    return { state: moved ? { ...state, contracts } : state, added: 0 };
+  }
   return { state: { ...state, contracts, entries: [...state.entries, ...newEntries] }, added };
 }
 
@@ -607,6 +617,63 @@ export function mergeStates(current, incoming) {
       contracts: [...current.contracts, ...newContracts],
     },
     added: { categories: newCats.length, entries: newEntries.length, contracts: newContracts.length },
+  };
+}
+
+/** ID der automatischen Buchung eines Vertrags an einem Fälligkeitstag. */
+export function contractEntryId(contractId, date) {
+  return `${contractId}@${date}`;
+}
+
+/**
+ * Drei-Wege-Abgleich für den Sync zweier Geräte.
+ * base   = letzter gemeinsamer Stand (null beim ersten Abgleich)
+ * local  = Stand auf diesem Gerät, remote = Stand auf dem Server.
+ * Je Datensatz (nach ID): Wer ihn seit 'base' geändert hat, gewinnt.
+ * Haben beide geändert, gewinnt dieses Gerät. Gelöscht wird nur, was die
+ * andere Seite unverändert gelassen hat; Löschen gegen Ändern behält die Änderung.
+ * Alle drei Stände müssen durch validateState gegangen sein.
+ */
+export function mergeThreeWay(base, local, remote) {
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const mergeList = (b = [], l, r, onConflict = (x) => x) => {
+    const B = new Map(b.map((x) => [x.id, x]));
+    const R = new Map(r.map((x) => [x.id, x]));
+    const Lids = new Set(l.map((x) => x.id));
+    const out = [];
+    const pick = (id, lv, rv) => {
+      const bv = B.get(id);
+      if (lv && rv) {
+        if (same(lv, rv)) return lv;
+        if (bv && same(lv, bv)) return rv;
+        if (bv && same(rv, bv)) return lv;
+        return onConflict(lv, rv);
+      }
+      if (lv) return bv && same(lv, bv) ? null : lv; // anderswo gelöscht?
+      return bv && same(rv, bv) ? null : rv; // hier gelöscht?
+    };
+    for (const lv of l) {
+      const v = pick(lv.id, lv, R.get(lv.id));
+      if (v) out.push(v);
+    }
+    for (const rv of r) {
+      if (Lids.has(rv.id)) continue;
+      const v = pick(rv.id, null, rv);
+      if (v) out.push(v);
+    }
+    return out;
+  };
+  const laterIso = (a, b) => (!a ? b : !b ? a : a > b ? a : b);
+  const contractConflict = (l, r) => ({ ...l, bookedThrough: laterIso(l.bookedThrough, r.bookedThrough) });
+  const ls = local.settings || {};
+  const rs = remote.settings || {};
+  const createdAt = [ls.createdAt, rs.createdAt].filter(Boolean).sort()[0] || new Date().toISOString();
+  return {
+    schema: SCHEMA_VERSION,
+    categories: mergeList(base?.categories, local.categories, remote.categories),
+    entries: mergeList(base?.entries, local.entries, remote.entries),
+    contracts: mergeList(base?.contracts, local.contracts, remote.contracts, contractConflict),
+    settings: { createdAt, lastBackupAt: laterIso(ls.lastBackupAt || null, rs.lastBackupAt || null) },
   };
 }
 

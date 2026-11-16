@@ -1,6 +1,6 @@
 // Service Worker: hält die App offline verfügbar.
 // Bei jeder Änderung an einer App-Datei VERSION erhöhen, sonst sieht das Handy die neue Version nicht.
-const VERSION = '1.0.0';
+const VERSION = '1.1.0';
 const CACHE = 'finanzen-' + VERSION;
 const ASSETS = [
   './',
@@ -9,6 +9,7 @@ const ASSETS = [
   './js/app.js',
   './js/logic.js',
   './js/store.js',
+  './js/sync.js',
   './manifest.webmanifest',
   './icons/icon-192.png',
   './icons/icon-512.png',
@@ -46,6 +47,8 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   const scope = new URL(self.registration.scope);
   if (!url.pathname.startsWith(scope.pathname)) return;
+  // Abgleich mit dem Server nie aus dem Zwischenspeicher
+  if (url.pathname.startsWith(scope.pathname + 'api/')) return;
 
   if (req.mode === 'navigate') {
     event.respondWith(

@@ -504,6 +504,7 @@ select.input { appearance: none; }
 .amount-wrap .cur { position: absolute; right: 18px; top: 50%; transform: translateY(-50%); font-size: 28px; font-weight: 700; color: var(--text-3); pointer-events: none; }
 .hint { font-size: 13px; color: var(--text-3); margin-top: 6px; }
 .hint.err { color: var(--neg); font-weight: 600; }
+.info.err { color: var(--neg); font-weight: 600; }
 .calc { font-size: 14px; color: var(--text-2); margin-top: 8px; font-weight: 550; }
 
 .cat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }

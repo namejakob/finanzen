@@ -1,0 +1,39 @@
+# Finanzen-Server auf dem Hetzner-VPS (Ordner ~/finanzen).
+#   ~/finanzen/app   = Klon dieses Repos (Aktualisieren: git pull, dann docker compose restart)
+#   ~/finanzen/data  = verschlüsselte Datenblöcke (Server kann sie nicht lesen)
+# Erreichbar nur über Caddy (Docker-Netz n8n_default), kein Port nach außen.
+services:
+  finanzen:
+    image: node:24-alpine
+    container_name: finanzen
+    restart: unless-stopped
+    user: "1000:1000"
+    read_only: true
+    working_dir: /srv/app
+    command: ["node", "server/server.mjs"]
+    environment:
+      PORT: "8080"
+      APP_DIR: /srv/app
+      DATA_DIR: /data
+    volumes:
+      - ./app:/srv/app:ro
+      - ./data:/data
+    networks: [n8n_default]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 1m
+      timeout: 5s
+
+networks:
+  n8n_default:
+    external: true
+
+# Eintrag im Caddyfile von ~/n8n (danach: docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile):
+#
+# finanzen.jakobg.de {
+#     encode gzip
+#     reverse_proxy finanzen:8080
+# }

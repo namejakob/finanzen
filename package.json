@@ -2,5 +2,5 @@
   "name": "finanzen",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test tests/logic.test.mjs" }
+  "scripts": { "test": "node --test tests/logic.test.mjs tests/sync.test.mjs" }
 }
