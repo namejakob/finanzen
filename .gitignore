@@ -1,0 +1,5 @@
+privat/
+node_modules/
+.claude/
+Thumbs.db
+desktop.ini
