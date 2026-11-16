@@ -9,7 +9,8 @@ mit ihrer eigenen Adresse zu sprechen. In diesem Repository liegt nur der
 Programmcode, keine Finanzdaten.
 
 Adresse: **https://finanzen.jakobg.de** (eigener Server, mit Abgleich).
-Die Kopie auf GitHub Pages (`namejakob.github.io/finanzen`) läuft ohne Abgleich.
+Die frühere Kopie auf GitHub Pages ist seit 16.11.2026 abgeschaltet. Dieses
+Repository bleibt, weil der Server seine Updates von hier holt.
 
 ## Abgleich Handy ↔ Laptop
 
