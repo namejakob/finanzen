@@ -1,6 +1,6 @@
 // Service Worker: hält die App offline verfügbar.
 // Bei jeder Änderung an einer App-Datei VERSION erhöhen, sonst sieht das Handy die neue Version nicht.
-const VERSION = '1.2.0';
+const VERSION = '1.2.1';
 const CACHE = 'finanzen-' + VERSION;
 const ASSETS = [
   './',

@@ -3,7 +3,7 @@ import * as L from './logic.js';
 import * as S from './store.js';
 import * as Y from './sync.js';
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.2.1';
 const SYNC_HOST = 'finanzen.jakobg.de';
 // Abgleich nur unter der eigenen Adresse (dort läuft der Server) und lokal zum Testen
 const SYNC_AVAILABLE = [SYNC_HOST, 'localhost', '127.0.0.1'].includes(location.hostname);
@@ -293,13 +293,53 @@ function render() {
   window.scrollTo(0, scrollY);
 }
 
-function setTab(tab) {
+// ---- Zurück-Taste (Android): erst Dialog, dann Fenster, dann zur Übersicht, erst dann raus.
+// Jede offene Ebene hat einen eigenen Eintrag im Browser-Verlauf. Angelegt wird er
+// beim Antippen (sonst überspringt Chrome ihn), entfernt beim Schließen per Knopf.
+const nav = { layers: [], toPop: 0, ignore: 0, timer: null };
+function pushLayer(name) {
+  nav.layers.push(name);
+  history.pushState({ layer: name }, '', location.href);
+}
+function dropLayer(name) {
+  const i = nav.layers.lastIndexOf(name);
+  if (i < 0) return;
+  nav.layers.splice(i, 1);
+  nav.toPop++;
+  // mehrere Ebenen auf einmal (z. B. Dialog und Fenster) in einem Schritt zurück
+  if (!nav.timer) {
+    nav.timer = setTimeout(() => {
+      nav.timer = null;
+      const n = nav.toPop;
+      nav.toPop = 0;
+      if (n) {
+        nav.ignore++;
+        history.go(-n);
+      }
+    });
+  }
+}
+window.addEventListener('popstate', () => {
+  if (nav.ignore) {
+    nav.ignore--;
+    return;
+  }
+  const top = nav.layers.pop();
+  if (top === 'modal') modal.close();
+  else if (top === 'sheet') closeSheet();
+  else if (top === 'tab') setTab('uebersicht', { fromBack: true });
+});
+
+function setTab(tab, { fromBack = false } = {}) {
   if (ui.tab === tab) {
     window.scrollTo({ top: 0, behavior: 'smooth' });
     return;
   }
+  if (tab === 'uebersicht') {
+    if (!fromBack) dropLayer('tab');
+  } else if (!nav.layers.includes('tab')) pushLayer('tab');
   ui.tab = tab;
-  history.replaceState(null, '', '#' + tab);
+  history.replaceState(history.state, '', '#' + tab);
   render();
   window.scrollTo(0, 0);
 }
@@ -1332,7 +1372,10 @@ async function deleteCategory() {
 // ---------------------------------------------------------------- Sheet & Dialoge
 
 function showSheet(focusSel) {
-  if (!sheet.open) sheet.showModal();
+  if (!sheet.open) {
+    sheet.showModal();
+    pushLayer('sheet');
+  }
   sheet.querySelector('.sheet-body').scrollTop = 0;
   if (focusSel) {
     const el = $(focusSel, sheet);
@@ -1356,6 +1399,7 @@ function closeSheet() {
   if (sheet.open) sheet.close();
 }
 sheet.addEventListener('close', () => {
+  dropLayer('sheet');
   draft = null;
   sheet.innerHTML = '';
 });
@@ -1383,12 +1427,16 @@ function choiceDialog({ title, text, buttons }) {
         resolve(v);
       }),
     );
-    modal.showModal();
+    if (!modal.open) {
+      modal.showModal();
+      pushLayer('modal');
+    }
     // sichere Option (letzte = Abbrechen) fokussieren
     modal.querySelector(`[data-modal-i="${buttons.length - 1}"]`)?.focus();
   });
 }
 modal.addEventListener('close', () => {
+  dropLayer('modal');
   if (modalResolve) {
     const r = modalResolve;
     modalResolve = null;
@@ -1557,9 +1605,7 @@ async function wipe() {
     return toast('Konnte keinen Rückgängig-Punkt anlegen. Nichts gelöscht.', { error: true });
   }
   await commit(L.createInitialState());
-  ui.tab = 'uebersicht';
-  history.replaceState(null, '', '#uebersicht');
-  render();
+  setTab('uebersicht');
   toast('Alles gelöscht. Unter „Mehr“ kannst du es rückgängig machen.', { duration: 7000 });
 }
 
